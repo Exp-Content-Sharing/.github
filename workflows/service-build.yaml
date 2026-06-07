@@ -1,0 +1,72 @@
+name: Common Build and Push Service
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'Name of the service'
+        required: true
+        type: string
+      image_version:
+        description: 'Docker image version'
+        required: true
+        type: string
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      REGISTRY_CA_CERT: ${{ secrets.REGISTRY_CA_CERT }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Trust Registry CA
+        if: env.REGISTRY_CA_CERT != ''
+        run: |
+          echo "Installing Registry CA certificate..."
+          echo "${{ env.REGISTRY_CA_CERT }}" | base64 -d | sudo tee /usr/local/share/ca-certificates/registry.local.crt > /dev/null
+          sudo update-ca-certificates
+
+      - name: Docker Login
+        if: env.REGISTRY_USERNAME != '' && env.REGISTRY_PASSWORD != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY_NAME }}
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ vars.REGISTRY_NAME }}/${{ inputs.service_name }}:${{ inputs.image_version }}
+            ${{ vars.REGISTRY_NAME }}/${{ inputs.service_name }}:latest
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.12.1
+
+      - name: Helm Login
+        id: helm-login
+        if: env.REGISTRY_USERNAME != '' && env.REGISTRY_PASSWORD != ''
+        run: |
+          echo "${{ env.REGISTRY_PASSWORD }}" | helm registry login ${{ vars.HELM_REGISTRY_NAME }} --username ${{ env.REGISTRY_USERNAME }} --password-stdin
+
+      - name: Package and Push Helm Chart
+        if: always() && (steps.helm-login.conclusion == 'success' || (env.REGISTRY_USERNAME == '' && env.REGISTRY_PASSWORD == ''))
+        run: |
+          IMAGE_VERSION=${{ inputs.image_version }}
+          HELM_REGISTRY=${{ vars.HELM_REGISTRY_NAME }}
+          SERVICE_NAME=${{ inputs.service_name }}
+          
+          echo "Packaging Helm chart version $IMAGE_VERSION with appVersion $IMAGE_VERSION"
+          helm package charts/$SERVICE_NAME/ --version $IMAGE_VERSION --app-version $IMAGE_VERSION
+          
+          echo "Pushing Helm chart to oci://$HELM_REGISTRY/charts"
+          helm push "$SERVICE_NAME-$IMAGE_VERSION.tgz" "oci://$HELM_REGISTRY/charts"

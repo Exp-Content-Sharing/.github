@@ -1,0 +1,102 @@
+name: Common Deploy Service
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'Name of the service'
+        required: true
+        type: string
+      image_version:
+        description: 'Helm chart/Image version'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      REGISTRY_CA_CERT: ${{ secrets.REGISTRY_CA_CERT }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Trust Registry CA
+        if: env.REGISTRY_CA_CERT != ''
+        run: |
+          echo "Installing Registry CA certificate..."
+          echo "${{ env.REGISTRY_CA_CERT }}" | base64 -d | sudo tee /usr/local/share/ca-certificates/registry.local.crt > /dev/null
+          sudo update-ca-certificates
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.12.1
+
+      - name: Helm Login
+        if: env.REGISTRY_USERNAME != '' && env.REGISTRY_PASSWORD != ''
+        run: |
+          echo "${{ env.REGISTRY_PASSWORD }}" | helm registry login ${{ vars.HELM_REGISTRY_NAME }} --username ${{ env.REGISTRY_USERNAME }} --password-stdin
+
+      - name: Set Kubernetes Context
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      - name: Deploy Service
+        run: |
+          IMAGE_VERSION=${{ inputs.image_version }}
+          SERVICE_NAME=${{ inputs.service_name }}
+          ENVIRONMENT="${{ vars.environment }}"
+          
+          # Ensure KUBECONFIG is decoded if it looks like base64
+          if echo "${{ secrets.KUBECONFIG }}" | grep -q "^[A-Za-z0-9+/]*=\{0,2\}$"; then
+            echo "Decoding KUBECONFIG from base64..."
+            mkdir -p ~/.kube
+            echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+            export KUBECONFIG=~/.kube/config
+          fi
+
+          HELM_REGISTRY=${{ vars.HELM_REGISTRY_NAME }}
+          REGISTRY_NAME=${{ vars.REGISTRY_NAME }}
+          
+          # The namespace will be read from the values file or we can default to service name
+          # But helm requires namespace flag, so we'll just use the service name as namespace
+          # if not provided. Wait, auth namespace is `auth`, content is `content`.
+          NAMESPACE=$SERVICE_NAME
+          
+          echo "Deploying $SERVICE_NAME service version $IMAGE_VERSION to namespace $NAMESPACE"
+          
+          if [ -f "deploy/values-${ENVIRONMENT}.yaml" ]; then
+            VALUES_FILE="deploy/values-${ENVIRONMENT}.yaml"
+          else
+            VALUES_FILE=""
+          fi
+          
+          OPTS=""
+          if [ -n "$VALUES_FILE" ]; then
+            echo "Using values file: $VALUES_FILE"
+            
+            if ! command -v envsubst &> /dev/null; then
+              echo "envsubst not found, installing gettext-base..."
+              sudo apt-get update -y && sudo apt-get install -y gettext-base
+            fi
+            
+            # Use envsubst to interpolate variables like ${AWS_ENDPOINT_URL}
+            envsubst < "$VALUES_FILE" > rendered-values.yaml
+            OPTS="-f rendered-values.yaml"
+          else
+            echo "Warning: Values file for environment $ENVIRONMENT not found"
+          fi
+
+          helm upgrade --install $SERVICE_NAME "oci://$HELM_REGISTRY/charts/$SERVICE_NAME" \
+            --version "$IMAGE_VERSION" \
+            --namespace "$NAMESPACE" \
+            --create-namespace \
+            --set image.repository="$REGISTRY_NAME/$SERVICE_NAME" \
+            --history-max 3 \
+            $OPTS \
+            --wait
