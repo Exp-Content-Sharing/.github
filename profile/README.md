@@ -71,4 +71,3 @@ The Content Sharing platform is organized into the following independent reposit
 *   **[e2e_test_service](https://github.com/Exp-Content-Sharing/e2e_test_service):** Contains the end-to-end testing suite to ensure system reliability across all services.
 *   **[infra_service](https://github.com/Exp-Content-Sharing/infra_service):** Manages the cloud infrastructure provisioning (AWS, Kubernetes) using tools like Terraform.
 *   **[ops_service](https://github.com/Exp-Content-Sharing/ops_service):** Contains operational configurations, scripts, and deployment pipelines using tools like Helmfile and Ansible.
-*   **[.github](https://github.com/Exp-Content-Sharing/.github):** Centralized GitHub organization repository containing global documentation, system architecture, and shared workflows.
